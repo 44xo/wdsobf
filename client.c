@@ -4,10 +4,11 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <ctype.h>
 
 #define PORT 3702  // Standard WSD port
 #define BUFFER_SIZE 2048
-#define ALPHABET_SIZE 26
+#define ALPHABET_SIZE 36
 #define UUID_LENGTH 36
 
 void error(const char *msg) {
@@ -15,24 +16,42 @@ void error(const char *msg) {
     exit(1);
 }
 
-void load_cipher_map(const char *cipher_map, char *reverse_map) {
-    // Create the reverse substitution map
-    for (int i = 0; i < ALPHABET_SIZE; i++) {
-        reverse_map[cipher_map[i] - 'a'] = 'a' + i;
+void load_cipher_map_from_uuid(const char *uuid, char *cipher_map) {
+    int segments[] = {8, 4, 4, 4, 12};
+    int pos = 0, index = 0;
+
+    for (int i = 0; i < 5; i++) {
+        for (int j = 0; j < segments[i]; j++) {
+            if (uuid[pos] != '-') {
+                cipher_map[index++] = uuid[pos];
+            }
+            pos++;
+        }
+        pos++;  // Skip the hyphen
     }
+    cipher_map[ALPHABET_SIZE] = '\0';
 }
 
-void decode_text(const char *input, const char *reverse_map, char *output) {
+void decode_text(const char *input, const char *cipher_map, char *output) {
+    const char *charset = "abcdefghijklmnopqrstuvwxyz0123456789";
+    char reverse_map[ALPHABET_SIZE];
+    
+    for (int i = 0; i < ALPHABET_SIZE; i++) {
+        reverse_map[cipher_map[i] - (isdigit(cipher_map[i]) ? '0' - 26 : 'a')] = charset[i];
+    }
+
     while (*input) {
-        if (*input >= 'a' && *input <= 'z') {
-            *output = reverse_map[*input - 'a'];
-        } else if (*input >= 'A' && *input <= 'Z') {
-            *output = reverse_map[*input - 'A'] - ('a' - 'A');
-        } else {
-            *output = *input; // Copy non-alphabet characters as-is
+        if (*input != '-') {  // Skip hyphens
+            const char *ptr = strchr(cipher_map, tolower(*input));
+            if (ptr) {
+                int index = ptr - cipher_map;
+                *output = reverse_map[index];
+            } else {
+                *output = *input; // Copy non-alphabet characters as-is
+            }
+            output++;
         }
         input++;
-        output++;
     }
     *output = '\0';
 }
@@ -93,16 +112,11 @@ int main() {
         extract_uuid(buffer, message_id, "<wsa:MessageID>urn:uuid:", "</wsa:MessageID>");
         extract_uuid(buffer, encoded_uuid, "<wsa:Address>urn:uuid:", "</wsa:Address>");
 
-        printf("Message ID (Cipher Map): %s\n", message_id);
-        printf("Encoded UUID: %s\n", encoded_uuid);
-
-        // Fixed cipher map
-        const char *cipher_map = "qwertyuiopasdfghjklzxcvbnm";
-        char reverse_map[ALPHABET_SIZE];
-        load_cipher_map(cipher_map, reverse_map);
+        char cipher_map[ALPHABET_SIZE + 1];
+        load_cipher_map_from_uuid(message_id, cipher_map);
 
         char decoded_text[UUID_LENGTH + 1];
-        decode_text(encoded_uuid, reverse_map, decoded_text);
+        decode_text(encoded_uuid, cipher_map, decoded_text);
 
         printf("Decoded Text: %s\n", decoded_text);
     }
