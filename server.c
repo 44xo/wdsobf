@@ -4,10 +4,12 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
+#include <ctype.h>
 
 #define PORT 3702  // Standard WSD port
 #define MAX_PACKET_SIZE 1024
-#define ALPHABET_SIZE 26
+#define ALPHABET_SIZE 36
 #define UUID_LENGTH 36
 
 void error(const char *msg) {
@@ -15,19 +17,26 @@ void error(const char *msg) {
     exit(1);
 }
 
-void load_cipher_map(const char *cipher_map, char *reverse_map) {
-    // Create the reverse substitution map
+void generate_cipher_map(char *cipher_map) {
+    const char *charset = "abcdefghijklmnopqrstuvwxyz0123456789";
+    strcpy(cipher_map, charset);
+
+    // Shuffle the characters
     for (int i = 0; i < ALPHABET_SIZE; i++) {
-        reverse_map[cipher_map[i] - 'a'] = 'a' + i;
+        int j = rand() % ALPHABET_SIZE;
+        char temp = cipher_map[i];
+        cipher_map[i] = cipher_map[j];
+        cipher_map[j] = temp;
     }
 }
 
 void encode_text(const char *input, const char *cipher_map, char *output) {
+    const char *charset = "abcdefghijklmnopqrstuvwxyz0123456789";
     while (*input) {
-        if (*input >= 'a' && *input <= 'z') {
-            *output = cipher_map[*input - 'a'];
-        } else if (*input >= 'A' && *input <= 'Z') {
-            *output = cipher_map[*input - 'A'] - ('a' - 'A');
+        const char *ptr = strchr(charset, tolower(*input));
+        if (ptr) {
+            int index = ptr - charset;
+            *output = cipher_map[index];
         } else {
             *output = *input; // Copy non-alphabet characters as-is
         }
@@ -37,20 +46,28 @@ void encode_text(const char *input, const char *cipher_map, char *output) {
     *output = '\0';
 }
 
+void format_cipher_map_as_uuid(const char *cipher_map, char *uuid) {
+    snprintf(uuid, UUID_LENGTH + 1, "%.8s-%.4s-%.4s-%.4s-%.12s", 
+             cipher_map, cipher_map + 8, cipher_map + 12, cipher_map + 16, cipher_map + 20);
+}
+
 int main(int argc, char *argv[]) {
-    if (argc != 4) {
-        fprintf(stderr, "Usage: %s <IP_ADDRESS> <UUID> <TEXT_TO_ENCODE>\n", argv[0]);
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <IP_ADDRESS> <TEXT_TO_ENCODE>\n", argv[0]);
         exit(1);
     }
 
     const char *ip_address = argv[1];
-    const char *uuid = argv[2];
-    const char *text_to_encode = argv[3];
+    const char *text_to_encode = argv[2];
 
-    // Fixed cipher map
-    const char *cipher_map = "qwertyuiopasdfghjklzxcvbnm";
+    srand(time(NULL));
+
+    char cipher_map[ALPHABET_SIZE + 1];
+    char formatted_cipher_map[UUID_LENGTH + 1];
     char encoded_text[UUID_LENGTH + 1];
 
+    generate_cipher_map(cipher_map);
+    format_cipher_map_as_uuid(cipher_map, formatted_cipher_map);
     encode_text(text_to_encode, cipher_map, encoded_text);
 
     // XML template with placeholders for custom data
@@ -58,7 +75,7 @@ int main(int argc, char *argv[]) {
 
     // Create a buffer for the final packet data
     char wsd_packet[MAX_PACKET_SIZE];
-    snprintf(wsd_packet, MAX_PACKET_SIZE, xml_template, uuid, encoded_text);
+    snprintf(wsd_packet, MAX_PACKET_SIZE, xml_template, formatted_cipher_map, encoded_text);
 
     int sockfd;
     struct sockaddr_in dest_addr;
