@@ -1,160 +1,302 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#undef UNICODE
+
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <ctype.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <time.h>
+#include <ctype.h>
 
-#pragma comment(lib, "Ws2_32.lib")
+// Need to link with Ws2_32.lib
+#pragma comment (lib, "Ws2_32.lib")
+// #pragma comment (lib, "Mswsock.lib")
 
-#define PORT 3702  // Same port as the server
-#define SERVER_IP "10.242.2.121"  // Replace with actual server IP if needed
-#define BUFFER_SIZE 2048
-#define UUID_LENGTH 36
-#define ALPHABET_SIZE 36
+#define DEFAULT_BUFLEN 512
+#define DEFAULT_PORT "27015"
 
-void error(const char* msg) {
-    fprintf(stderr, "%s: %d\n", msg, WSAGetLastError());
-    exit(1);
+#define FORMAT_LENGTH 36
+#define NUMBER_STR_SIZE 13
+#define SEGMENT_FORMAT "%.8s-%.4s-%.4s-%.4s-%.12s"
+#define LINE_COUNT(input_len) (((input_len) + FORMAT_LENGTH - 1) / FORMAT_LENGTH)
+
+char randomPaddingCharacter() {
+    return "0123456789abcdef"[rand() % 16];
 }
 
-void encoding_uuid(char* uuid) {
-    // Random UUID generator based on format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    int segments[] = { 8, 4, 4, 4, 12 };
+char terminatingCharacter() {
+    return "abcdef"[rand() % 6];
+}
 
-    srand((unsigned int)time(NULL));  // Seed random number generator
+void encoding_uuid(char* uuid, int number) {
+    const int segments[] = { 8, 4, 4, 4, 12 };
+    int bufferIndex = 0;
 
     for (int i = 0; i < 5; i++) {
-        for (int j = 0; j < segments[i]; j++) {
-            int r = rand() % 36;
-            if (r < 26) {
-                uuid[j] = 'a' + r;  // Generate a random lowercase letter
-            }
-            else {
-                uuid[j] = '0' + (r - 26);  // Generate a random digit
-            }
+        int segmentSize = segments[i];
+
+        if (i == 4) {
+            int appendSize = snprintf(NULL, 0, "%da", number);
+            segmentSize -= appendSize;
+            bufferIndex += snprintf(uuid + bufferIndex, FORMAT_LENGTH + 1 - bufferIndex, "%d%c", number, terminatingCharacter());
         }
-        uuid += segments[i];
+
+        for (int j = 0; j < segmentSize; j++) {
+            uuid[bufferIndex++] = randomPaddingCharacter();
+        }
+
         if (i < 4) {
-            *uuid++ = '-';  // Add hyphens between segments
+            uuid[bufferIndex++] = '-';
         }
     }
-    *uuid = '\0';  // Null-terminate the string
+    uuid[bufferIndex] = '\0';
 }
 
-void load_cipher_map_from_uuid(const char* uuid, char* cipher_map) {
-    int segments[] = { 8, 4, 4, 4, 12 };
-    int pos = 0, index = 0;
+int decoding_uuid(const char* uuid) {
+    const char* last_segment = strrchr(uuid, '-') + 1;
+    char number_str[NUMBER_STR_SIZE] = { 0 };
+    int i = 0;
 
-    for (int i = 0; i < 5; i++) {
-        for (int j = 0; j < segments[i]; j++) {
-            if (uuid[pos] != '-') {
-                cipher_map[index++] = uuid[pos];
+    while (isdigit(last_segment[i]) && i < NUMBER_STR_SIZE - 1) {
+        number_str[i++] = last_segment[i];
+    }
+    number_str[i] = '\0';
+
+    return atoi(number_str);
+}
+
+void xorAndConvertToHex(const char* input, char* output, const char* key) {
+    for (size_t i = 0; input[i] != '\0'; i++) {
+        unsigned char xor_char = input[i] ^ key[i % strlen(key)];
+        snprintf(output + (i * 2), 3, "%02x", xor_char);
+    }
+}
+
+void hexAndXorDecode(const char* input, char* output, const char* key) {
+    for (size_t i = 0; i < strlen(input) / 2; i++) {
+        unsigned char hex_byte;
+        // Use scanf_s instead of sscanf
+        sscanf_s(input + (i * 2), "%02hhx", &hex_byte);
+        output[i] = hex_byte ^ key[i % strlen(key)];
+    }
+    output[strlen(input) / 2] = '\0';
+}
+
+
+char** split_format_and_pad(const char* input, int* line_count) {
+    size_t input_len = strlen(input);
+    int padding_count = (input_len % FORMAT_LENGTH) ? FORMAT_LENGTH - (input_len % FORMAT_LENGTH) : 0;
+    size_t padded_len = input_len + padding_count;
+
+    char* padded_input = (char*)malloc(padded_len + 1);
+    if (!padded_input) return NULL;
+
+    memcpy(padded_input, input, input_len);
+    for (size_t i = input_len; i < padded_len; i++) {
+        padded_input[i] = randomPaddingCharacter();
+    }
+    padded_input[padded_len] = '\0';
+
+    *line_count = LINE_COUNT(padded_len);
+    char** lines = (char**)malloc(*line_count * sizeof(char*));
+    if (!lines) {
+        free(padded_input);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < *line_count; i++) {
+        lines[i] = (char*)malloc(37);
+        if (!lines[i]) {
+            for (size_t j = 0; j < i; j++) free(lines[j]);
+            free(lines);
+            free(padded_input);
+            return NULL;
+        }
+
+        snprintf(lines[i], 37, SEGMENT_FORMAT,
+            padded_input + i * FORMAT_LENGTH,
+            padded_input + i * FORMAT_LENGTH + 8,
+            padded_input + i * FORMAT_LENGTH + 12,
+            padded_input + i * FORMAT_LENGTH + 16,
+            padded_input + i * FORMAT_LENGTH + 20);
+    }
+    free(padded_input);
+    return lines;
+}
+
+int mai1n() {
+    srand((unsigned int)time(NULL));
+
+    const char* input = "skibiditoilet1234567890osdfh;oashdfohospdhfopasdfoaspdiofjopijp9rewjp9qfhj9erf";
+    size_t hexOutputSize = strlen(input) * 2 + 1;
+    char* hexOutput = (char*)malloc(hexOutputSize);
+    char* uuid = (char*)malloc(FORMAT_LENGTH + 1);
+
+    if (!hexOutput || !uuid) {
+        printf("Memory allocation failed\n");
+        free(hexOutput);
+        free(uuid);
+        return 1;
+    }
+
+    encoding_uuid(uuid, strlen(input));
+    printf("Generated UUID: %s\n", uuid);
+    xorAndConvertToHex(input, hexOutput, uuid);
+    printf("Encoded Output (Hex): %s\n", hexOutput);
+
+    int line_count;
+    char** lines = split_format_and_pad(hexOutput, &line_count);
+    if (!lines) {
+        free(hexOutput);
+        free(uuid);
+        return 1;
+    }
+
+    for (int i = 0; i < line_count; i++) {
+        printf("Line %d: %s\n", i + 1, lines[i]);
+        free(lines[i]);
+    }
+    free(lines);
+
+    int extracted_number = decoding_uuid(uuid);
+    printf("Extracted number: %d\n", extracted_number);
+
+    char* decodedOutput = (char*)malloc(hexOutputSize / 2 + 1);
+    if (!decodedOutput) {
+        printf("Memory allocation for decodedOutput failed\n");
+        free(hexOutput);
+        free(uuid);
+        return 1;
+    }
+
+    hexAndXorDecode(hexOutput, decodedOutput, uuid);
+    printf("Decoded Original Output: %s\n", decodedOutput);
+
+    free(hexOutput);
+    free(uuid);
+    free(decodedOutput);
+
+    return 0;
+}
+
+void handle_client(SOCKET ClientSocket) {
+    char recvbuf[DEFAULT_BUFLEN];
+    int recvbuflen = DEFAULT_BUFLEN;
+    int iResult;
+
+    printf("Client connected.\n");
+
+    do {
+        // Receive data from the client
+        iResult = recv(ClientSocket, recvbuf, recvbuflen, 0);
+        if (iResult > 0) {
+            recvbuf[iResult] = '\0'; // Null-terminate the received data
+            printf("Received: %s\n", recvbuf);
+
+            // Echo the data back to the client
+            iResult = send(ClientSocket, recvbuf, iResult, 0);
+            if (iResult == SOCKET_ERROR) {
+                printf("send failed with error: %d\n", WSAGetLastError());
+                break;
             }
-            pos++;
+            printf("Echoed message to client.\n");
         }
-        pos++;  // Skip the hyphen
-    }
-    cipher_map[ALPHABET_SIZE] = '\0';
-}
-
-void encode_text(const char* input, const char* cipher_map, char* output) {
-    const char* charset = "abcdefghijklmnopqrstuvwxyz0123456789";
-
-    while (*input) {
-        const char* ptr = strchr(charset, tolower(*input));
-        if (ptr) {
-            int index = ptr - charset;
-            *output = cipher_map[index];
+        else if (iResult == 0) {
+            printf("Connection closed by client.\n");
+            break;
         }
         else {
-            *output = *input;  // Copy non-alphabet characters as-is
+            printf("recv failed with error: %d\n", WSAGetLastError());
+            break;
         }
-        output++;
-        input++;
-    }
-    *output = '\0';
+    } while (iResult > 0);
+
+    // Cleanup and close the socket
+    closesocket(ClientSocket);
+    printf("Client disconnected.\n");
 }
 
-void send_message(SOCKET sockfd, const struct sockaddr_in* servaddr, socklen_t len, const char* message, const char* message_id) {
-    char cipher_map[ALPHABET_SIZE + 1];
-    load_cipher_map_from_uuid(message_id, cipher_map);
-
-    char encoded_message[BUFFER_SIZE];
-    encode_text(message, cipher_map, encoded_message);
-
-    // Construct the full XML message with the encoded text
-    char full_message[BUFFER_SIZE];
-    snprintf(full_message, sizeof(full_message),
-        "<?xml version=\"1.0\"?>"
-        "<soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\">"
-        "<soap:Header>"
-        "<wsa:MessageID>urn:uuid:%s</wsa:MessageID>"
-        "<wsa:Address>urn:uuid:%s</wsa:Address>"
-        "</soap:Header>"
-        "</soap:Envelope>", message_id, encoded_message);
-
-    // Send the message to the server
-    int n = sendto(sockfd, full_message, (int)strlen(full_message), 0, (struct sockaddr*)servaddr, len);
-    if (n == SOCKET_ERROR) {
-        error("Error sending message");
-    }
-}
-
-int main() {
+int __cdecl main(void) {
     WSADATA wsaData;
-    SOCKET sockfd;
-    struct sockaddr_in servaddr;
+    int iResult;
+    SOCKET ListenSocket = INVALID_SOCKET;
+    SOCKET ClientSocket = INVALID_SOCKET;
+    struct addrinfo* result = NULL;
+    struct addrinfo hints;
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        error("WSAStartup failed");
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
     }
 
-    // Create UDP socket
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
-        error("Socket creation failed");
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET; // Use IPv4
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+
+    // Resolve the server address and port
+    iResult = getaddrinfo(NULL, DEFAULT_PORT, &hints, &result);
+    if (iResult != 0) {
+        printf("getaddrinfo failed with error: %d\n", iResult);
+        WSACleanup();
+        return 1;
     }
 
-    // Set server address
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_port = htons(PORT);
-    if (inet_pton(AF_INET, SERVER_IP, &servaddr.sin_addr) <= 0) {
-        error("Invalid server address");
+    // Create a SOCKET for the server to listen on
+    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET) {
+        printf("socket failed with error: %ld\n", WSAGetLastError());
+        freeaddrinfo(result);
+        WSACleanup();
+        return 1;
     }
 
-    socklen_t len = sizeof(servaddr);
+    // Bind the socket
+    iResult = bind(ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    if (iResult == SOCKET_ERROR) {
+        printf("bind failed with error: %d\n", WSAGetLastError());
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
 
-    // Generate a random UUID for the message ID
-    char message_id[UUID_LENGTH + 1];
-    generate_random_uuid(message_id);
+    freeaddrinfo(result);
 
-    // Main loop to send messages to the server
+    // Listen for incoming connections
+    iResult = listen(ListenSocket, SOMAXCONN);
+    if (iResult == SOCKET_ERROR) {
+        printf("listen failed with error: %d\n", WSAGetLastError());
+        closesocket(ListenSocket);
+        WSACleanup();
+        return 1;
+    }
+
+    printf("Server is listening on port %s...\n", DEFAULT_PORT);
+
+    // Accept and handle incoming connections
     while (1) {
-        char input[BUFFER_SIZE];
-        printf("Enter message (or type '!file <filepath>' to request a file): ");
-        fgets(input, BUFFER_SIZE, stdin);
-        input[strcspn(input, "\n")] = '\0';  // Remove newline character
-
-        if (strlen(input) == 0) {
-            continue;  // Skip empty input
+        printf("Waiting for a client to connect...\n");
+        ClientSocket = accept(ListenSocket, NULL, NULL);
+        if (ClientSocket == INVALID_SOCKET) {
+            printf("accept failed with error: %d\n", WSAGetLastError());
+            break;
         }
 
-        // Send the message or file request to the server
-        send_message(sockfd, &servaddr, len, input, message_id);
-
-        if (strncmp(input, "!file", 5) == 0) {
-            printf("File request sent for: %s\n", input + 6);  // Display the file path
-        }
+        // Handle the connected client
+        handle_client(ClientSocket);
     }
 
-    // Close socket
-    closesocket(sockfd);
-
-    // Cleanup Winsock
+    // Cleanup and shutdown
+    closesocket(ListenSocket);
     WSACleanup();
+    printf("Server shutting down.\n");
 
     return 0;
 }
