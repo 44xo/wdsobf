@@ -1,186 +1,304 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 #include <ctype.h>
-#include <io.h>
-#include <fcntl.h>
 
-#pragma comment(lib, "Ws2_32.lib")
+// Need to link with Ws2_32.lib, Mswsock.lib, and Advapi32.lib
+#pragma comment (lib, "Ws2_32.lib")
+#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "AdvApi32.lib")
 
-#define PORT 3702  // Standard WSD port
-#define BUFFER_SIZE 2048
-#define ALPHABET_SIZE 36
-#define UUID_LENGTH 36
 
-void error(const char* msg) {
-    fprintf(stderr, "%s: %d\n", msg, WSAGetLastError());
-    exit(1);
+#define DEFAULT_BUFLEN 512
+#define DEFAULT_PORT "27015"
+#define FORMAT_LENGTH 36
+#define NUMBER_STR_SIZE 13
+#define SEGMENT_FORMAT "%.8s-%.4s-%.4s-%.4s-%.12s"
+#define LINE_COUNT(input_len) (((input_len) + FORMAT_LENGTH - 1) / FORMAT_LENGTH)
+
+char randomPaddingCharacter() {
+    return "0123456789abcdef"[rand() % 16];
 }
 
-void load_cipher_map_from_uuid(const char* uuid, char* cipher_map) {
-    int segments[] = { 8, 4, 4, 4, 12 };
-    int pos = 0, index = 0;
+char terminatingCharacter() {
+    return "abcdef"[rand() % 6];
+}
+
+void encoding_uuid(char* uuid, int number) {
+    const int segments[] = { 8, 4, 4, 4, 12 };
+    int bufferIndex = 0;
 
     for (int i = 0; i < 5; i++) {
-        for (int j = 0; j < segments[i]; j++) {
-            if (uuid[pos] != '-') {
-                cipher_map[index++] = uuid[pos];
-            }
-            pos++;
+        int segmentSize = segments[i];
+
+        if (i == 4) {
+            int appendSize = snprintf(NULL, 0, "%da", number);
+            segmentSize -= appendSize;
+            bufferIndex += snprintf(uuid + bufferIndex, FORMAT_LENGTH + 1 - bufferIndex, "%d%c", number, terminatingCharacter());
         }
-        pos++;  // Skip the hyphen
+
+        for (int j = 0; j < segmentSize; j++) {
+            uuid[bufferIndex++] = randomPaddingCharacter();
+        }
+
+        if (i < 4) {
+            uuid[bufferIndex++] = '-';
+        }
     }
-    cipher_map[ALPHABET_SIZE] = '\0';
+    uuid[bufferIndex] = '\0';
 }
 
-void decode_text(const char* input, const char* cipher_map, char* output) {
-    const char* charset = "abcdefghijklmnopqrstuvwxyz0123456789";
-    char reverse_map[ALPHABET_SIZE] = { 0 };
+int decoding_uuid(const char* uuid) {
+    const char* last_segment = strrchr(uuid, '-') + 1;
+    char number_str[NUMBER_STR_SIZE] = { 0 };
+    int i = 0;
 
-    // Build reverse map
-    for (int i = 0; i < ALPHABET_SIZE; i++) {
-        if (isdigit(cipher_map[i])) {
-            reverse_map[cipher_map[i] - '0' + 26] = charset[i];  // Digits start after 26 letters
-        }
-        else if (isalpha(cipher_map[i])) {
-            reverse_map[cipher_map[i] - 'a'] = charset[i];  // Letters are at the start
-        }
+    while (isdigit(last_segment[i]) && i < NUMBER_STR_SIZE - 1) {
+        number_str[i++] = last_segment[i];
     }
+    number_str[i] = '\0';
 
-    // Decode input
-    while (*input) {
-        if (*input != '-') {  // Skip hyphens
-            const char* ptr = strchr(cipher_map, tolower(*input));
-            if (ptr) {
-                int index = ptr - cipher_map;
-                *output = reverse_map[index];
-            }
-            else {
-                *output = *input;  // Copy non-alphabet characters as-is
-            }
-            output++;
-        }
-        input++;
+    return atoi(number_str);
+}
+
+void xorAndConvertToHex(const char* input, char* output, const char* key) {
+    for (size_t i = 0; input[i] != '\0'; i++) {
+        unsigned char xor_char = input[i] ^ key[i % strlen(key)];
+        snprintf(output + (i * 2), 3, "%02x", xor_char);
     }
-    *output = '\0';
+}
+
+void hexAndXorDecode(const char* input, char* output, const char* key) {
+    for (size_t i = 0; i < strlen(input) / 2; i++) {
+        unsigned char hex_byte;
+        // Use scanf_s instead of sscanf
+        sscanf_s(input + (i * 2), "%02hhx", &hex_byte);
+        output[i] = hex_byte ^ key[i % strlen(key)];
+    }
+    output[strlen(input) / 2] = '\0';
 }
 
 
-void extract_uuid(const char* xml_data, char* uuid, const char* start_tag, const char* end_tag) {
-    const char* start_ptr = strstr(xml_data, start_tag);
-    if (start_ptr) {
-        start_ptr += strlen(start_tag);
-        const char* end_ptr = strstr(start_ptr, end_tag);
-        if (end_ptr) {
-            size_t uuid_length = end_ptr - start_ptr;
-            strncpy_s(uuid, uuid_length + 1, start_ptr, uuid_length);  // Ensure buffer size and null-termination
-            uuid[uuid_length] = '\0';  // Null-terminate the UUID string just in case
+char** split_format_and_pad(const char* input, int* line_count) {
+    size_t input_len = strlen(input);
+    int padding_count = (input_len % FORMAT_LENGTH) ? FORMAT_LENGTH - (input_len % FORMAT_LENGTH) : 0;
+    size_t padded_len = input_len + padding_count;
+
+    char* padded_input = (char*)malloc(padded_len + 1);
+    if (!padded_input) return NULL;
+
+    memcpy(padded_input, input, input_len);
+    for (size_t i = input_len; i < padded_len; i++) {
+        padded_input[i] = randomPaddingCharacter();
+    }
+    padded_input[padded_len] = '\0';
+
+    *line_count = LINE_COUNT(padded_len);
+    char** lines = (char**)malloc(*line_count * sizeof(char*));
+    if (!lines) {
+        free(padded_input);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < *line_count; i++) {
+        lines[i] = (char*)malloc(37);
+        if (!lines[i]) {
+            for (size_t j = 0; j < i; j++) free(lines[j]);
+            free(lines);
+            free(padded_input);
+            return NULL;
+        }
+
+        snprintf(lines[i], 37, SEGMENT_FORMAT,
+            padded_input + i * FORMAT_LENGTH,
+            padded_input + i * FORMAT_LENGTH + 8,
+            padded_input + i * FORMAT_LENGTH + 12,
+            padded_input + i * FORMAT_LENGTH + 16,
+            padded_input + i * FORMAT_LENGTH + 20);
+    }
+    free(padded_input);
+    return lines;
+}
+
+int mai1n() {
+    srand((unsigned int)time(NULL));
+
+    const char* input = "skibiditoilet1234567890osdfh;oashdfohospdhfopasdfoaspdiofjopijp9rewjp9qfhj9erf";
+    size_t hexOutputSize = strlen(input) * 2 + 1;
+    char* hexOutput = (char*)malloc(hexOutputSize);
+    char* uuid = (char*)malloc(FORMAT_LENGTH + 1);
+
+    if (!hexOutput || !uuid) {
+        printf("Memory allocation failed\n");
+        free(hexOutput);
+        free(uuid);
+        return 1;
+    }
+
+    encoding_uuid(uuid, strlen(input));
+    printf("Generated UUID: %s\n", uuid);
+    xorAndConvertToHex(input, hexOutput, uuid);
+    printf("Encoded Output (Hex): %s\n", hexOutput);
+
+    int line_count;
+    char** lines = split_format_and_pad(hexOutput, &line_count);
+    if (!lines) {
+        free(hexOutput);
+        free(uuid);
+        return 1;
+    }
+
+    for (int i = 0; i < line_count; i++) {
+        printf("Line %d: %s\n", i + 1, lines[i]);
+        free(lines[i]);
+    }
+    free(lines);
+
+    int extracted_number = decoding_uuid(uuid);
+    printf("Extracted number: %d\n", extracted_number);
+
+    char* decodedOutput = (char*)malloc(hexOutputSize / 2 + 1);
+    if (!decodedOutput) {
+        printf("Memory allocation for decodedOutput failed\n");
+        free(hexOutput);
+        free(uuid);
+        return 1;
+    }
+
+    hexAndXorDecode(hexOutput, decodedOutput, uuid);
+    printf("Decoded Original Output: %s\n", decodedOutput);
+
+    free(hexOutput);
+    free(uuid);
+    free(decodedOutput);
+
+    return 0;
+}
+
+
+void send_messages(SOCKET ConnectSocket, const char* messages[], int message_count) {
+    char recvbuf[DEFAULT_BUFLEN];
+    int recvbuflen = DEFAULT_BUFLEN;
+    int iResult;
+
+    for (int i = 0; i < message_count; i++) {
+        const char* message = messages[i];
+        printf("Sending message: %s\n", message);
+
+        // Send message
+        iResult = send(ConnectSocket, message, (int)strlen(message), 0);
+        if (iResult == SOCKET_ERROR) {
+            printf("send failed with error: %d\n", WSAGetLastError());
+            break;
+        }
+        printf("Bytes Sent: %d\n", iResult);
+
+        // Receive response
+        iResult = recv(ConnectSocket, recvbuf, recvbuflen, 0);
+        if (iResult > 0) {
+            recvbuf[iResult] = '\0'; // Null-terminate the received data
+            printf("Response received: %s\n", recvbuf);
+        }
+        else if (iResult == 0) {
+            printf("Connection closed by server.\n");
+            break;
         }
         else {
-            fprintf(stderr, "End tag not found\n");
+            printf("recv failed with error: %d\n", WSAGetLastError());
+            break;
         }
-    }
-    else {
-        fprintf(stderr, "Start tag not found\n");
     }
 }
 
-// Function to send the contents of a file
-void send_file(SOCKET sockfd, const struct sockaddr_in* cliaddr, socklen_t len, const char* file_path) {
-    FILE* file;
-    errno_t err = fopen_s(&file, file_path, "rb");
-    if (err != 0 || file == NULL) {
-        perror("Error opening file");
-        return;
-    }
-
-    char file_buffer[BUFFER_SIZE];
-    size_t bytes_read;
-    while ((bytes_read = fread(file_buffer, 1, sizeof(file_buffer), file)) > 0) {
-        int send_result = sendto(sockfd, file_buffer, (int)bytes_read, 0, (struct sockaddr*)cliaddr, len);
-        if (send_result == SOCKET_ERROR) {
-            error("Error sending file data");
-        }
-    }
-
-    printf("File sent successfully: %s\n", file_path);
-    fclose(file);
-}
-int main() {
+int __cdecl main(int argc, char** argv) {
     WSADATA wsaData;
-    SOCKET sockfd;
-    struct sockaddr_in servaddr, cliaddr;
-    char buffer[BUFFER_SIZE];
-    socklen_t len = sizeof(cliaddr);
+    SOCKET ConnectSocket = INVALID_SOCKET;
+    struct addrinfo* result = NULL, * ptr = NULL, hints;
+    int iResult;
+
+    const char* messages[] = {
+        "Hello, Server!",
+        "How are you?",
+        "This is the client.",
+        "Goodbye!"
+    };
+    int message_count = sizeof(messages) / sizeof(messages[0]);
+
+    if (argc != 2) {
+        printf("usage: %s server-name\n", argv[0]);
+        return 1;
+    }
 
     // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        error("WSAStartup failed");
+    iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        printf("WSAStartup failed with error: %d\n", iResult);
+        return 1;
     }
 
-    // Create UDP socket
-    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) == INVALID_SOCKET) {
-        error("Socket creation failed");
-    }
+    do {
+        ZeroMemory(&hints, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
 
-    // Set server address
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr = INADDR_ANY;
-    servaddr.sin_port = htons(PORT);
-
-    // Bind the socket
-    if (bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)) == SOCKET_ERROR) {
-        error("Bind failed");
-    }
-
-    printf("Listening for WSD packets on port %d...\n", PORT);
-
-    while (1) {
-        int n = recvfrom(sockfd, buffer, BUFFER_SIZE, 0, (struct sockaddr*)&cliaddr, &len);
-        if (n == SOCKET_ERROR) {
-            error("Receive failed");
+        // Resolve the server address and port
+        iResult = getaddrinfo(argv[1], DEFAULT_PORT, &hints, &result);
+        if (iResult != 0) {
+            printf("getaddrinfo failed with error: %d\n", iResult);
+            WSACleanup();
+            return 1;
         }
-        buffer[n] = '\0';  // Null-terminate the received message
 
-        char client_ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &cliaddr.sin_addr, client_ip, INET_ADDRSTRLEN);
-        printf("Received packet from %s:%d\n", client_ip, ntohs(cliaddr.sin_port));
+        // Attempt to connect to an address until one succeeds
+        for (ptr = result; ptr != NULL; ptr = ptr->ai_next) {
+            ConnectSocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+            if (ConnectSocket == INVALID_SOCKET) {
+                printf("socket failed with error: %ld\n", WSAGetLastError());
+                WSACleanup();
+                return 1;
+            }
 
-        // Extract and decode the message UUID and encoded text
-        char message_id[UUID_LENGTH + 1];
-        char encoded_uuid[UUID_LENGTH + 1];
-
-        extract_uuid(buffer, message_id, "<wsa:MessageID>urn:uuid:", "</wsa:MessageID>");
-        extract_uuid(buffer, encoded_uuid, "<wsa:Address>urn:uuid:", "</wsa:Address>");
-
-        char cipher_map[ALPHABET_SIZE + 1];
-        load_cipher_map_from_uuid(message_id, cipher_map);
-
-        char decoded_text[UUID_LENGTH + 1];
-        decode_text(encoded_uuid, cipher_map, decoded_text);
-
-        printf("Decoded Text: %s\n", decoded_text);
-
-        // Check if the decoded text contains the "!file" prefix
-        if (strncmp(decoded_text, "!file", 5) == 0) {
-            // Extract the file path from the message
-            char* file_path = decoded_text + 6;  // Skip "!file "
-            printf("File transfer requested for: %s\n", file_path);
-            send_file(sockfd, &cliaddr, len, file_path);
+            // Connect to server.
+            iResult = connect(ConnectSocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+            if (iResult == SOCKET_ERROR) {
+                closesocket(ConnectSocket);
+                ConnectSocket = INVALID_SOCKET;
+                continue;
+            }
+            break;
         }
-        else {
-            printf("Received message: %s\n", decoded_text);
+
+        freeaddrinfo(result);
+
+        if (ConnectSocket == INVALID_SOCKET) {
+            printf("Unable to connect to server. Retrying...\n");
+            Sleep(2000); // Wait before retrying
+            continue;
         }
-    }
 
-    // Close socket
-    closesocket(sockfd);
+        // Send messages
+        send_messages(ConnectSocket, messages, message_count);
 
-    // Cleanup Winsock
+        // Shutdown the connection if done
+        iResult = shutdown(ConnectSocket, SD_SEND);
+        if (iResult == SOCKET_ERROR) {
+            printf("shutdown failed with error: %d\n", WSAGetLastError());
+        }
+
+        // Cleanup
+        closesocket(ConnectSocket);
+        ConnectSocket = INVALID_SOCKET;
+        printf("Disconnected from server. Waiting to reconnect...\n");
+
+    } while (1); // Infinite loop to reconnect
+
     WSACleanup();
-
     return 0;
 }
