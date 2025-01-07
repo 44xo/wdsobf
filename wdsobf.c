@@ -64,11 +64,13 @@ void xorAndConvertToHex(const char* input, char* output, const char* key) {
 void hexAndXorDecode(const char* input, char* output, const char* key) {
     for (size_t i = 0; i < strlen(input) / 2; i++) {
         unsigned char hex_byte;
-        sscanf(input + (i * 2), "%02hhx", &hex_byte);
+        // Use scanf_s instead of sscanf
+        sscanf_s(input + (i * 2), "%02hhx", &hex_byte);
         output[i] = hex_byte ^ key[i % strlen(key)];
     }
     output[strlen(input) / 2] = '\0';
 }
+
 
 char** split_format_and_pad(const char* input, int* line_count) {
     size_t input_len = strlen(input);
